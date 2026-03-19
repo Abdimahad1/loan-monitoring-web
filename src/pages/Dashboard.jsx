@@ -1,3 +1,4 @@
+// src/pages/Dashboard.jsx
 import {
   Users,
   CreditCard,
@@ -13,7 +14,9 @@ import {
   MoreHorizontal,
   Calendar,
   UserPlus,
-  Loader
+  Loader,
+  ChevronLeft,
+  ChevronRight
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import axios from "axios";
@@ -23,19 +26,61 @@ import * as XLSX from 'xlsx';
 
 const API_URL = "http://localhost:5000/api";
 
+// Helper functions
+const formatCurrency = (amount) => {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2
+  }).format(amount || 0);
+};
+
+const formatDate = (dateString) => {
+  if (!dateString) return 'N/A';
+  return new Date(dateString).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  });
+};
+
+const toNumber = (value) => {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+};
+
+const getInitials = (name) => {
+  if (!name) return '?';
+  return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+};
+
 function Dashboard() {
   const [timeframe, setTimeframe] = useState("week");
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState(null);
+  const [payments, setPayments] = useState([]);
+  const [recentPayments, setRecentPayments] = useState([]);
   const [loans, setLoans] = useState([]);
   const [users, setUsers] = useState([]);
-  const [recentLoans, setRecentLoans] = useState([]);
   const [exporting, setExporting] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pagination, setPagination] = useState({
+    page: 1,
+    limit: 10,
+    total: 0,
+    pages: 1
+  });
+  
   const navigate = useNavigate();
 
   useEffect(() => {
     fetchDashboardData();
-  }, [timeframe]);
+  }, [timeframe, currentPage]);
 
   const fetchDashboardData = async () => {
     setLoading(true);
@@ -43,65 +88,127 @@ function Dashboard() {
       const token = localStorage.getItem('token');
       const headers = { Authorization: `Bearer ${token}` };
 
-      // Fetch stats overview
-      const statsRes = await axios.get(`${API_URL}/loans/stats/overview`, { headers });
-      
-      // Fetch recent loans (last 5)
-      const loansRes = await axios.get(`${API_URL}/loans?limit=5&sortBy=createdAt&sortOrder=desc`, { headers });
-      
-      // Fetch all loans for calculations
-      const allLoansRes = await axios.get(`${API_URL}/loans?limit=1000`, { headers });
-      
-      // Fetch users for user metrics
-      const usersRes = await axios.get(`${API_URL}/users?limit=1000`, { headers });
+      console.log('📊 Fetching dashboard data...');
 
-      if (statsRes.data.success) {
+      // Fetch all data in parallel
+      const [statsRes, loansRes, usersRes, paymentsRes, recentPaymentsRes] = await Promise.all([
+        axios.get(`${API_URL}/loans/stats/overview`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/loans?limit=1000`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/users?limit=1000`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/payments/admin/all?limit=1000`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/payments/admin/all?page=${currentPage}&limit=10&sortBy=createdAt&sortOrder=desc`, { headers }).catch(err => ({ data: { success: false } }))
+      ]);
+
+      console.log('📊 Stats response:', statsRes.data);
+      console.log('📊 Loans response:', loansRes.data);
+      console.log('📊 Users response:', usersRes.data);
+      console.log('📊 All payments response:', paymentsRes.data);
+      console.log('📊 Recent payments response:', recentPaymentsRes.data);
+
+      // Process payments data
+      if (paymentsRes.data?.success) {
+        setPayments(paymentsRes.data.data || []);
+      }
+
+      // Process recent payments with pagination
+      if (recentPaymentsRes.data?.success) {
+        setRecentPayments(recentPaymentsRes.data.data || []);
+        setPagination(recentPaymentsRes.data.pagination || {
+          page: 1,
+          limit: 10,
+          total: 0,
+          pages: 1
+        });
+      }
+
+      // Process loans
+      if (loansRes.data?.success) {
+        const allLoans = loansRes.data.data || [];
+        
+        // Create a map of payments by loan for quick lookup
+        const paymentsByLoan = {};
+        if (paymentsRes.data?.success) {
+          paymentsRes.data.data.forEach(payment => {
+            if (payment.status === 'success' || payment.status === 'completed') {
+              const loanId = payment.loanId?.toString();
+              if (loanId) {
+                if (!paymentsByLoan[loanId]) {
+                  paymentsByLoan[loanId] = [];
+                }
+                paymentsByLoan[loanId].push(payment);
+              }
+            }
+          });
+        }
+
+        // Process loans with payment data
+        const processedLoans = allLoans.map(loan => {
+          const loanPayments = paymentsByLoan[loan._id?.toString()] || [];
+          const totalPaid = loanPayments.reduce((sum, p) => sum + toNumber(p.amount), 0);
+          
+          return {
+            ...loan,
+            paidAmount: totalPaid,
+            remainingAmount: toNumber(loan.amount) - totalPaid,
+            payments: loanPayments
+          };
+        });
+        
+        setLoans(processedLoans);
+      }
+
+      // Set stats and users
+      if (statsRes.data?.success) {
         setStats(statsRes.data.data);
       }
-      
-      if (loansRes.data.success) {
-        setRecentLoans(loansRes.data.data);
-      }
-      
-      if (allLoansRes.data.success) {
-        setLoans(allLoansRes.data.data);
-      }
-      
-      if (usersRes.data.success) {
+
+      if (usersRes.data?.success) {
         setUsers(usersRes.data.data);
       }
 
     } catch (error) {
-      console.error('Error fetching dashboard data:', error);
+      console.error('❌ Error fetching dashboard data:', error);
       toast.error('Failed to load dashboard data');
     } finally {
       setLoading(false);
     }
   };
 
-  // Calculate metrics from data
+  // Calculate metrics from payments and loans
   const calculateMetrics = () => {
-    if (!loans.length || !stats || !users.length) return null;
+    if (!payments.length || !loans.length) return null;
 
-    // Get stats from API
-    const byStatus = stats.byStatus || [];
-    const byRisk = stats.byRisk || [];
-
-    // Calculate totals
-    const totalPortfolio = byStatus.reduce((sum, s) => sum + (s.totalAmount || 0), 0);
-    const totalPaid = byStatus.reduce((sum, s) => sum + (s.paidAmount || 0), 0);
+    // Calculate total collected from successful payments
+    const successfulPayments = payments.filter(p => p.status === 'success' || p.status === 'completed');
+    const totalCollected = successfulPayments.reduce((sum, p) => sum + toNumber(p.amount), 0);
     
-    // Loan counts by status
-    const activeLoans = byStatus.find(s => s._id === 'active')?.count || 0;
-    const overdueLoans = byStatus.find(s => s._id === 'overdue')?.count || 0;
-    const completedLoans = byStatus.find(s => s._id === 'completed')?.count || 0;
-    const pendingLoans = byStatus.find(s => s._id === 'pending')?.count || 0;
-    const approvedLoans = byStatus.find(s => s._id === 'approved')?.count || 0;
+    // Calculate this month's collections
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const thisMonthPayments = successfulPayments.filter(p => new Date(p.createdAt) >= startOfMonth);
+    const thisMonthCollected = thisMonthPayments.reduce((sum, p) => sum + toNumber(p.amount), 0);
 
-    // Calculate amounts
-    const activeAmount = byStatus.find(s => s._id === 'active')?.totalAmount || 0;
-    const overdueAmount = byStatus.find(s => s._id === 'overdue')?.totalAmount || 0;
-    const completedAmount = byStatus.find(s => s._id === 'completed')?.totalAmount || 0;
+    // Calculate this week's collections
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - now.getDay());
+    const thisWeekPayments = successfulPayments.filter(p => new Date(p.createdAt) >= startOfWeek);
+    const thisWeekCollected = thisWeekPayments.reduce((sum, p) => sum + toNumber(p.amount), 0);
+
+    // Count on-time payments (paid before or on due date)
+    const onTimePayments = successfulPayments.filter(p => {
+      // This would need loan schedule data to be accurate
+      return true; // Simplified for now
+    }).length;
+
+    // Calculate overdue stats
+    const overdueLoans = loans.filter(l => l.status === 'overdue').length;
+    const overdueAmount = loans
+      .filter(l => l.status === 'overdue')
+      .reduce((sum, l) => sum + (toNumber(l.amount) - toNumber(l.paidAmount)), 0);
+
+    // Calculate collection rate
+    const totalPortfolio = loans.reduce((sum, l) => sum + toNumber(l.amount), 0);
+    const collectionRate = totalPortfolio > 0 ? (totalCollected / totalPortfolio) * 100 : 0;
 
     // User counts
     const totalUsers = users.length;
@@ -112,16 +219,22 @@ function Dashboard() {
       return created >= weekAgo;
     }).length;
 
-    // Calculate average loan size
-    const avgLoanSize = loans.length > 0 
-      ? loans.reduce((sum, l) => sum + l.amount, 0) / loans.length 
-      : 0;
+    // Loan counts by status
+    const activeLoans = loans.filter(l => l.status === 'active').length;
+    const completedLoans = loans.filter(l => l.status === 'completed').length;
+    const pendingLoans = loans.filter(l => l.status === 'pending').length;
 
-    // Calculate approval rate
-    const totalProcessed = approvedLoans + (byStatus.find(s => s._id === 'rejected')?.count || 0);
-    const approvalRate = totalProcessed > 0 
-      ? (approvedLoans / totalProcessed) * 100 
-      : 0;
+    // Calculate amounts by status
+    const activeAmount = loans
+      .filter(l => l.status === 'active')
+      .reduce((sum, l) => sum + toNumber(l.amount), 0);
+
+    const completedAmount = loans
+      .filter(l => l.status === 'completed')
+      .reduce((sum, l) => sum + toNumber(l.amount), 0);
+
+    // Calculate average loan size
+    const avgLoanSize = loans.length > 0 ? totalPortfolio / loans.length : 0;
 
     // Weekly chart data
     const weeklyData = generateWeeklyData();
@@ -129,18 +242,20 @@ function Dashboard() {
     return {
       totalUsers,
       newUsersThisWeek,
-      totalPortfolio,
-      totalPaid,
-      activeLoans,
-      activeAmount,
+      totalCollected,
+      thisMonthCollected,
+      thisWeekCollected,
+      onTimePayments: successfulPayments.length,
+      totalPayments: payments.length,
       overdueLoans,
       overdueAmount,
+      collectionRate,
+      activeLoans,
+      activeAmount,
       completedLoans,
       completedAmount,
       pendingLoans,
-      approvedLoans,
       avgLoanSize,
-      approvalRate,
       weeklyData
     };
   };
@@ -148,25 +263,40 @@ function Dashboard() {
   // Generate weekly chart data
   const generateWeeklyData = () => {
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const today = new Date();
+    const now = new Date();
+    const weekAgo = new Date(now);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    
+    // Get successful payments from last 7 days
+    const recentSuccessfulPayments = payments.filter(p => 
+      (p.status === 'success' || p.status === 'completed') && 
+      new Date(p.createdAt) >= weekAgo
+    );
     
     return days.map((day, index) => {
-      // Simulate data based on actual loans (you can make this more sophisticated)
-      const dayLoans = loans.filter(l => {
-        const loanDate = new Date(l.createdAt);
-        return loanDate.getDay() === index;
+      // Filter payments from this day of week
+      const dayPayments = recentSuccessfulPayments.filter(p => {
+        const paymentDate = new Date(p.createdAt);
+        return paymentDate.getDay() === index;
       });
       
-      const disbursed = dayLoans.reduce((sum, l) => sum + l.amount, 0);
-      const collected = dayLoans.reduce((sum, l) => sum + (l.paidAmount || 0), 0);
+      const collected = dayPayments.reduce((sum, p) => sum + toNumber(p.amount), 0);
       
-      // Scale for visualization (normalize to max height)
-      const maxAmount = Math.max(...loans.map(l => l.amount)) || 1000;
+      // For disbursed, use loans created on that day
+      const dayLoans = loans.filter(l => {
+        const loanDate = new Date(l.createdAt);
+        return loanDate >= weekAgo && loanDate.getDay() === index;
+      });
+      
+      const disbursed = dayLoans.reduce((sum, l) => sum + toNumber(l.amount), 0);
+      
+      // Scale for visualization
+      const maxAmount = Math.max(disbursed, collected, 1000);
       
       return {
         day,
-        disbursed: (disbursed / maxAmount) * 100,
-        collected: (collected / maxAmount) * 100,
+        disbursed: maxAmount > 0 ? (disbursed / maxAmount) * 100 : 0,
+        collected: maxAmount > 0 ? (collected / maxAmount) * 100 : 0,
         actualDisbursed: disbursed,
         actualCollected: collected
       };
@@ -184,32 +314,38 @@ function Dashboard() {
       // Dashboard Summary Sheet
       const summaryData = [
         ['Dashboard Summary', new Date().toLocaleDateString()],
+        [''],
         ['Metric', 'Value'],
         ['Total Users', metrics?.totalUsers || 0],
         ['New Users (This Week)', metrics?.newUsersThisWeek || 0],
-        ['Total Portfolio', `$${metrics?.totalPortfolio?.toLocaleString() || 0}`],
-        ['Active Loans', `${metrics?.activeLoans || 0} ($${metrics?.activeAmount?.toLocaleString()})`],
-        ['Overdue Loans', `${metrics?.overdueLoans || 0} ($${metrics?.overdueAmount?.toLocaleString()})`],
-        ['Completed Loans', `${metrics?.completedLoans || 0} ($${metrics?.completedAmount?.toLocaleString()})`],
-        ['Average Loan Size', `$${metrics?.avgLoanSize?.toFixed(0) || 0}`],
-        ['Approval Rate', `${metrics?.approvalRate?.toFixed(1) || 0}%`]
+        ['Total Collected', formatCurrency(metrics?.totalCollected || 0)],
+        ['This Month', formatCurrency(metrics?.thisMonthCollected || 0)],
+        ['This Week', formatCurrency(metrics?.thisWeekCollected || 0)],
+        ['Collection Rate', `${(metrics?.collectionRate || 0).toFixed(1)}%`],
+        ['Active Loans', `${metrics?.activeLoans || 0} (${formatCurrency(metrics?.activeAmount || 0)})`],
+        ['Overdue Loans', `${metrics?.overdueLoans || 0} (${formatCurrency(metrics?.overdueAmount || 0)})`],
+        ['Completed Loans', `${metrics?.completedLoans || 0} (${formatCurrency(metrics?.completedAmount || 0)})`],
+        ['Pending Loans', metrics?.pendingLoans || 0],
+        ['Average Loan Size', formatCurrency(metrics?.avgLoanSize || 0)]
       ];
       
       const ws = XLSX.utils.aoa_to_sheet(summaryData);
       XLSX.utils.book_append_sheet(wb, ws, "Dashboard Summary");
       
-      // Recent Loans Sheet
-      const loansData = recentLoans.map(l => ({
-        'Loan ID': l.loanId,
-        'Borrower': l.borrower?.name,
-        'Amount': l.amount,
-        'Status': l.status,
-        'Due Date': new Date(l.endDate).toLocaleDateString(),
-        'Progress': `${((l.paidAmount / l.amount) * 100).toFixed(0)}%`
+      // Recent Payments Sheet
+      const paymentsData = recentPayments.map(p => ({
+        'Date': formatDate(p.createdAt),
+        'Borrower': p.userId?.name || 'N/A',
+        'Loan ID': p.loanId_display || p.loanId,
+        'Amount': formatCurrency(p.amount),
+        'Method': p.paymentMethod,
+        'Phone': p.phoneNumber,
+        'Status': p.status,
+        'Transaction ID': p.transactionId
       }));
       
-      const ws2 = XLSX.utils.json_to_sheet(loansData);
-      XLSX.utils.book_append_sheet(wb, ws2, "Recent Loans");
+      const ws2 = XLSX.utils.json_to_sheet(paymentsData);
+      XLSX.utils.book_append_sheet(wb, ws2, "Recent Payments");
       
       // Save file
       XLSX.writeFile(wb, `dashboard_export_${new Date().toISOString().split('T')[0]}.xlsx`);
@@ -220,6 +356,17 @@ function Dashboard() {
     } finally {
       setExporting(false);
     }
+  };
+
+  // Handle payment click navigation
+  const handlePaymentClick = (loanId) => {
+    if (loanId) {
+      navigate(`/loans/${loanId}`);
+    }
+  };
+
+  const handlePageChange = (newPage) => {
+    setCurrentPage(newPage);
   };
 
   if (loading) {
@@ -236,7 +383,7 @@ function Dashboard() {
   return (
     <div className="space-y-8">
       
-      {/* Header Section with Actions */}
+      {/* Header Section */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold bg-gradient-to-r from-green-700 to-green-600 bg-clip-text text-transparent">
@@ -289,30 +436,30 @@ function Dashboard() {
           color="green"
         />
         <StatCard
-          title="Active Loans"
-          value={`$${metrics?.activeAmount?.toLocaleString() || '0'}`}
-          subtitle={`${metrics?.activeLoans || 0} loans`}
-          trend={`+${metrics?.activeLoans || 0} active`}
+          title="Total Collected"
+          value={formatCurrency(metrics?.totalCollected || 0)}
+          subtitle={`${metrics?.totalPayments || 0} payments`}
+          trend={`${(metrics?.collectionRate || 0).toFixed(1)}% of portfolio`}
           trendUp={true}
-          icon={<CreditCard size={22} />}
+          icon={<DollarSign size={22} />}
           color="emerald"
         />
         <StatCard
           title="Overdue Loans"
-          value={`$${metrics?.overdueAmount?.toLocaleString() || '0'}`}
-          subtitle={`${metrics?.overdueLoans || 0} loans`}
-          trend={metrics?.overdueLoans > 0 ? `${metrics.overdueLoans} overdue` : "0 overdue"}
+          value={metrics?.overdueLoans?.toString() || "0"}
+          subtitle={formatCurrency(metrics?.overdueAmount || 0)}
+          trend={metrics?.overdueLoans > 0 ? `${metrics.overdueLoans} loans` : "0 overdue"}
           trendUp={false}
           icon={<AlertTriangle size={22} />}
           color="orange"
         />
         <StatCard
-          title="Completed Loans"
-          value={`$${metrics?.completedAmount?.toLocaleString() || '0'}`}
-          subtitle={`${metrics?.completedLoans || 0} loans`}
-          trend={`+${metrics?.completedLoans || 0} completed`}
+          title="This Month"
+          value={formatCurrency(metrics?.thisMonthCollected || 0)}
+          subtitle={`${metrics?.thisWeekCollected ? formatCurrency(metrics.thisWeekCollected) : '$0'} this week`}
+          trend="Current period"
           trendUp={true}
-          icon={<CheckCircle size={22} />}
+          icon={<Calendar size={22} />}
           color="green"
         />
       </div>
@@ -325,10 +472,10 @@ function Dashboard() {
             <div>
               <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
                 <TrendingUp size={20} className="text-green-600" />
-                Loan Performance
+                Collections vs Disbursements (Last 7 Days)
               </h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                Weekly disbursement vs collection
+                Daily collection and loan disbursement amounts
               </p>
             </div>
           </div>
@@ -340,12 +487,12 @@ function Dashboard() {
                   <div 
                     className="w-3 bg-green-500 rounded-t-sm transition-all duration-500" 
                     style={{ height: `${Math.max(data.disbursed, 5)}px` }}
-                    title={`Disbursed: $${data.actualDisbursed.toLocaleString()}`}
+                    title={`Disbursed: ${formatCurrency(data.actualDisbursed)}`}
                   />
                   <div 
                     className="w-3 bg-green-200 rounded-t-sm transition-all duration-500" 
                     style={{ height: `${Math.max(data.collected, 5)}px` }}
-                    title={`Collected: $${data.actualCollected.toLocaleString()}`}
+                    title={`Collected: ${formatCurrency(data.actualCollected)}`}
                   />
                 </div>
                 <span className="text-xs text-gray-500">{data.day}</span>
@@ -376,15 +523,15 @@ function Dashboard() {
             <div className="flex justify-between items-center p-3 bg-green-50 rounded-lg">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-white rounded-lg">
-                  <DollarSign size={18} className="text-green-600" />
+                  <CreditCard size={18} className="text-green-600" />
                 </div>
                 <div>
-                  <p className="text-sm text-gray-600">Avg. Loan Size</p>
-                  <p className="font-semibold text-gray-800">${metrics?.avgLoanSize?.toFixed(0) || '0'}</p>
+                  <p className="text-sm text-gray-600">Active Loans</p>
+                  <p className="font-semibold text-gray-800">{metrics?.activeLoans || 0} loans</p>
                 </div>
               </div>
-              <span className="text-xs text-green-600 bg-white px-2 py-1 rounded-full">
-                +{((metrics?.avgLoanSize || 0) / 1000).toFixed(1)}k
+              <span className="text-sm font-medium text-green-600">
+                {formatCurrency(metrics?.activeAmount || 0)}
               </span>
             </div>
             
@@ -409,15 +556,15 @@ function Dashboard() {
             <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-white rounded-lg">
-                  <CreditCard size={18} className="text-green-600" />
+                  <CheckCircle size={18} className="text-green-600" />
                 </div>
                 <div>
-                  <p className="text-sm text-gray-600">Approval Rate</p>
-                  <p className="font-semibold text-gray-800">{metrics?.approvalRate?.toFixed(1) || '0'}%</p>
+                  <p className="text-sm text-gray-600">Completed Loans</p>
+                  <p className="font-semibold text-gray-800">{metrics?.completedLoans || 0} loans</p>
                 </div>
               </div>
-              <span className="text-xs text-green-600">
-                +{((metrics?.approvalRate || 0) / 20).toFixed(1)}%
+              <span className="text-sm font-medium text-green-600">
+                {formatCurrency(metrics?.completedAmount || 0)}
               </span>
             </div>
 
@@ -442,31 +589,27 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* Recent Loans Section */}
+      {/* Recent Payments Section - Using Repayments table style */}
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
         <div className="p-6 border-b border-gray-100">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
-                <CreditCard size={20} className="text-green-600" />
-                Recent Loans Activity
+                <DollarSign size={20} className="text-green-600" />
+                Recent Repayment Activity
               </h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                Latest loan applications and status updates
+                Latest payments received from borrowers
               </p>
             </div>
             
             <div className="flex items-center gap-3">
               <button 
-                onClick={() => navigate('/loans')}
+                onClick={() => navigate('/repayments')}
                 className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 hover:text-green-600 hover:bg-green-50 rounded-lg transition"
               >
                 <Filter size={16} />
-                View All
-              </button>
-              <button className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 hover:text-green-600 hover:bg-green-50 rounded-lg transition">
-                <Calendar size={16} />
-                {timeframe === 'week' ? 'This Week' : timeframe === 'month' ? 'This Month' : 'Today'}
+                View All Payments
               </button>
             </div>
           </div>
@@ -476,54 +619,115 @@ function Dashboard() {
           <table className="w-full text-left">
             <thead className="bg-gray-50 text-xs uppercase tracking-wider text-gray-600">
               <tr>
+                <th className="px-6 py-4">Date</th>
                 <th className="px-6 py-4">Borrower</th>
                 <th className="px-6 py-4">Loan ID</th>
                 <th className="px-6 py-4">Amount</th>
+                <th className="px-6 py-4">Method</th>
                 <th className="px-6 py-4">Status</th>
-                <th className="px-6 py-4">Due Date</th>
-                <th className="px-6 py-4">Progress</th>
+                <th className="px-6 py-4">Phone</th>
                 <th className="px-6 py-4"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {recentLoans.map((loan) => (
-                <LoanRow 
-                  key={loan._id}
-                  borrower={loan.borrower?.name || 'N/A'}
-                  loanId={loan.loanId}
-                  amount={`$${loan.amount?.toLocaleString()}`}
-                  status={loan.status}
-                  dueDate={new Date(loan.endDate).toLocaleDateString('en-US', { 
-                    day: 'numeric', 
-                    month: 'short', 
-                    year: 'numeric' 
-                  })}
-                  progress={Math.round((loan.paidAmount / loan.amount) * 100) || 0}
-                  onClick={() => navigate(`/loans/${loan._id}`)}
+              {recentPayments.map((payment) => (
+                <PaymentRow 
+                  key={payment._id}
+                  date={formatDate(payment.createdAt)}
+                  borrower={payment.userId?.name || 'Unknown'}
+                  borrowerAvatar={getInitials(payment.userId?.name)}
+                  loanId={payment.loanId_display || payment.loanId}
+                  amount={formatCurrency(payment.amount)}
+                  method={payment.paymentMethod}
+                  status={payment.status}
+                  phone={payment.phoneNumber}
+                  onClick={() => handlePaymentClick(payment.loanId)}
                 />
               ))}
+              {recentPayments.length === 0 && (
+                <tr>
+                  <td colSpan="8" className="px-6 py-12 text-center text-gray-500">
+                    No payments found
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
         
-        <div className="p-6 border-t border-gray-100 flex justify-between items-center">
-          <p className="text-sm text-gray-500">
-            Showing {recentLoans.length} of {loans.length} loans
-          </p>
-          <button 
-            onClick={() => navigate('/loans')}
-            className="text-sm font-medium text-green-600 hover:text-green-700 flex items-center gap-1"
-          >
-            View All Loans
-            <ArrowUpRight size={16} />
-          </button>
-        </div>
+        {/* Pagination */}
+        {pagination.pages > 1 && (
+          <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between">
+            <p className="text-sm text-gray-500">
+              Showing {((pagination.page - 1) * pagination.limit) + 1} to {Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} payments
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handlePageChange(currentPage - 1)}
+                disabled={currentPage === 1}
+                className="p-2 border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ChevronLeft size={16} />
+              </button>
+              
+              {[...Array(Math.min(5, pagination.pages))].map((_, i) => {
+                let pageNum;
+                if (pagination.pages <= 5) {
+                  pageNum = i + 1;
+                } else if (currentPage <= 3) {
+                  pageNum = i + 1;
+                } else if (currentPage >= pagination.pages - 2) {
+                  pageNum = pagination.pages - 4 + i;
+                } else {
+                  pageNum = currentPage - 2 + i;
+                }
+                
+                return (
+                  <button
+                    key={i}
+                    onClick={() => handlePageChange(pageNum)}
+                    className={`px-3 py-1.5 rounded-lg text-sm transition ${
+                      currentPage === pageNum
+                        ? 'bg-green-600 text-white'
+                        : 'border border-gray-200 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {pageNum}
+                  </button>
+                );
+              })}
+              
+              <button
+                onClick={() => handlePageChange(currentPage + 1)}
+                disabled={currentPage === pagination.pages}
+                className="p-2 border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+        
+        {pagination.pages <= 1 && (
+          <div className="p-6 border-t border-gray-100 flex justify-between items-center">
+            <p className="text-sm text-gray-500">
+              Showing {recentPayments.length} of {pagination.total} payments
+            </p>
+            <button 
+              onClick={() => navigate('/repayments')}
+              className="text-sm font-medium text-green-600 hover:text-green-700 flex items-center gap-1"
+            >
+              View All Payments
+              <ArrowUpRight size={16} />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-// Enhanced StatCard Component
+// StatCard Component
 function StatCard({ title, value, subtitle, trend, trendUp, icon, color = "green" }) {
   const colorVariants = {
     green: "bg-green-50 text-green-700 border-green-200",
@@ -564,72 +768,53 @@ function StatCard({ title, value, subtitle, trend, trendUp, icon, color = "green
   );
 }
 
-// Loan Row Component
-function LoanRow({ borrower, loanId, amount, status, dueDate, progress, onClick }) {
+// Payment Row Component (from Repayments page)
+function PaymentRow({ date, borrower, borrowerAvatar, loanId, amount, method, status, phone, onClick }) {
   const statusConfig = {
-    active: {
-      color: "bg-green-100 text-green-700 border-green-200",
-      label: "Active",
-      progressColor: "bg-green-500"
-    },
-    overdue: {
-      color: "bg-orange-100 text-orange-700 border-orange-200",
-      label: "Overdue",
-      progressColor: "bg-orange-500"
-    },
-    pending: {
-      color: "bg-yellow-100 text-yellow-700 border-yellow-200",
-      label: "Pending",
-      progressColor: "bg-yellow-500"
-    },
-    approved: {
-      color: "bg-blue-100 text-blue-700 border-blue-200",
-      label: "Approved",
-      progressColor: "bg-blue-500"
-    },
-    completed: {
-      color: "bg-gray-100 text-gray-700 border-gray-200",
-      label: "Completed",
-      progressColor: "bg-green-600"
-    },
-    rejected: {
-      color: "bg-red-100 text-red-700 border-red-200",
-      label: "Rejected",
-      progressColor: "bg-red-500"
-    }
+    success: { color: "bg-green-100 text-green-700 border-green-200", label: "Success" },
+    paid: { color: "bg-green-100 text-green-700 border-green-200", label: "Paid" },
+    completed: { color: "bg-green-100 text-green-700 border-green-200", label: "Completed" },
+    pending: { color: "bg-yellow-100 text-yellow-700 border-yellow-200", label: "Pending" },
+    failed: { color: "bg-red-100 text-red-700 border-red-200", label: "Failed" }
   };
 
-  const config = statusConfig[status] || statusConfig.pending;
+  const config = statusConfig[status?.toLowerCase()] || statusConfig.pending;
 
   return (
-    <tr 
-      className="hover:bg-gray-50/80 transition-colors cursor-pointer"
-      onClick={onClick}
-    >
+    <tr className="hover:bg-gray-50/80 transition-colors group cursor-pointer" onClick={onClick}>
       <td className="px-6 py-4">
-        <div className="font-medium text-gray-800">{borrower}</div>
+        <div className="flex items-center gap-2 text-gray-600">
+          <Calendar size={14} className="text-gray-400" />
+          <span className="text-sm">{date}</span>
+        </div>
       </td>
-      <td className="px-6 py-4 text-sm text-gray-600">{loanId}</td>
-      <td className="px-6 py-4 font-medium text-gray-800">{amount}</td>
+      <td className="px-6 py-4">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-r from-green-600 to-emerald-600 flex items-center justify-center text-white font-semibold text-xs">
+            {borrowerAvatar}
+          </div>
+          <span className="text-sm font-medium text-gray-800">{borrower}</span>
+        </div>
+      </td>
+      <td className="px-6 py-4">
+        <span className="font-mono text-sm text-gray-600">{loanId}</span>
+      </td>
+      <td className="px-6 py-4">
+        <span className="font-semibold text-gray-800">{amount}</span>
+      </td>
+      <td className="px-6 py-4">
+        <span className="text-sm text-gray-600">{method || 'N/A'}</span>
+      </td>
       <td className="px-6 py-4">
         <span className={`px-3 py-1 text-xs font-medium rounded-full border ${config.color}`}>
           {config.label}
         </span>
       </td>
-      <td className="px-6 py-4 text-sm text-gray-600">{dueDate}</td>
       <td className="px-6 py-4">
-        <div className="flex items-center gap-3">
-          <div className="w-24 bg-gray-200 rounded-full h-2">
-            <div 
-              className={`${config.progressColor} h-2 rounded-full transition-all duration-500`}
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          <span className="text-xs text-gray-600">{progress}%</span>
-        </div>
+        <span className="text-sm text-gray-600">{phone || 'N/A'}</span>
       </td>
       <td className="px-6 py-4">
-        <button className="p-2 hover:bg-gray-100 rounded-lg transition">
+        <button className="p-1.5 hover:bg-gray-100 rounded-lg transition">
           <MoreHorizontal size={16} className="text-gray-500" />
         </button>
       </td>

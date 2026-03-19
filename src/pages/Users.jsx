@@ -1,3 +1,4 @@
+// src/pages/Users.jsx
 import { 
   Plus, 
   Search, 
@@ -335,21 +336,20 @@ function Users() {
                 <th className="px-4 py-3 cursor-pointer hover:text-gray-900" onClick={() => handleSort('createdAt')}>
                   Created {sortBy === 'createdAt' && (sortOrder === 'desc' ? '↓' : '↑')}
                 </th>
-                <th className="px-4 py-3">Loans</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan="6" className="px-4 py-8 text-center text-gray-500">
                     <Loader className="animate-spin mx-auto mb-2" size={24} />
                     Loading users...
                   </td>
                 </tr>
               ) : users.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan="6" className="px-4 py-8 text-center text-gray-500">
                     No users found
                   </td>
                 </tr>
@@ -474,7 +474,7 @@ function StatsCard({ title, value, icon, color }) {
   );
 }
 
-// User Row Component
+// User Row Component - Removed the Loans column
 function UserRow({ user, onEdit, onDelete }) {
   const roleConfig = {
     borrower: { color: "bg-blue-100 text-blue-700", label: "Borrower" },
@@ -541,12 +541,6 @@ function UserRow({ user, onEdit, onDelete }) {
         <div className="flex items-center gap-1.5 text-xs text-gray-600">
           <Calendar size={12} className="text-gray-400" />
           {formatDate(user.createdAt)}
-        </div>
-      </td>
-      <td className="px-4 py-3">
-        <div className="text-sm">
-          <span className="font-medium text-gray-800">{user.loanStats?.totalLoans || 0}</span>
-          <span className="text-xs text-gray-500 ml-1">loans</span>
         </div>
       </td>
       <td className="px-4 py-3">

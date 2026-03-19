@@ -1,3 +1,4 @@
+// src/pages/Reports.jsx
 import { 
   BarChart3, 
   TrendingUp, 
@@ -19,7 +20,6 @@ import { useState, useEffect } from "react";
 import axios from "axios";
 import toast from 'react-hot-toast';
 import * as XLSX from 'xlsx';
-import { saveAs } from 'file-saver';
 
 const API_URL = "http://localhost:5000/api";
 
@@ -29,10 +29,13 @@ function Reports() {
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState(null);
   const [loans, setLoans] = useState([]);
+  const [payments, setPayments] = useState([]);
   const [users, setUsers] = useState([]);
+  const [overdueSummary, setOverdueSummary] = useState(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [selectedReport, setSelectedReport] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [paymentStats, setPaymentStats] = useState(null);
 
   // Date range calculations
   const getDateRange = () => {
@@ -57,26 +60,29 @@ function Reports() {
       const token = localStorage.getItem('token');
       const headers = { Authorization: `Bearer ${token}` };
 
-      // Fetch stats overview
-      const statsRes = await axios.get(`${API_URL}/loans/stats/overview`, { headers });
-      
-      // Fetch all loans for calculations
-      const loansRes = await axios.get(`${API_URL}/loans?limit=1000`, { headers });
-      
-      // Fetch users for growth metrics
-      const usersRes = await axios.get(`${API_URL}/users?role=borrower&limit=1000`, { headers });
+      // Fetch all data in parallel
+      const [
+        statsRes, 
+        loansRes, 
+        usersRes, 
+        paymentsRes,
+        overdueRes,
+        paymentStatsRes
+      ] = await Promise.all([
+        axios.get(`${API_URL}/loans/stats/overview`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/loans?limit=1000`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/users?limit=1000`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/payments/admin/all?limit=1000`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/payments/admin/overdue-summary`, { headers }).catch(err => ({ data: { success: false } })),
+        axios.get(`${API_URL}/payments/admin/dashboard-stats`, { headers }).catch(err => ({ data: { success: false } }))
+      ]);
 
-      if (statsRes.data.success) {
-        setStats(statsRes.data.data);
-      }
-      
-      if (loansRes.data.success) {
-        setLoans(loansRes.data.data);
-      }
-      
-      if (usersRes.data.success) {
-        setUsers(usersRes.data.data);
-      }
+      if (statsRes.data?.success) setStats(statsRes.data.data);
+      if (loansRes.data?.success) setLoans(loansRes.data.data);
+      if (usersRes.data?.success) setUsers(usersRes.data.data);
+      if (paymentsRes.data?.success) setPayments(paymentsRes.data.data);
+      if (overdueRes.data?.success) setOverdueSummary(overdueRes.data.data);
+      if (paymentStatsRes.data?.success) setPaymentStats(paymentStatsRes.data.data);
 
     } catch (error) {
       console.error('Error fetching data:', error);
@@ -86,16 +92,21 @@ function Reports() {
     }
   };
 
-  // Calculate metrics from loans data
+  // Calculate metrics from real data
   const calculateMetrics = () => {
-    if (!loans.length || !stats) return null;
+    if (!loans.length) return null;
 
-    const totalPortfolio = stats.byStatus?.reduce((sum, s) => sum + (s.totalAmount || 0), 0) || 0;
-    const totalPaid = stats.byStatus?.reduce((sum, s) => sum + (s.paidAmount || 0), 0) || 0;
+    const totalPortfolio = loans.reduce((sum, l) => sum + (l.amount || 0), 0);
+    const totalPaid = payments
+      .filter(p => p.status === 'success')
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
     
     const activeLoans = loans.filter(l => l.status === 'active').length;
     const completedLoans = loans.filter(l => l.status === 'completed').length;
     const overdueLoans = loans.filter(l => l.status === 'overdue').length;
+    const pendingLoans = loans.filter(l => l.status === 'pending').length;
+    const approvedLoans = loans.filter(l => l.status === 'approved').length;
+    const rejectedLoans = loans.filter(l => l.status === 'rejected').length;
     const defaultedLoans = loans.filter(l => l.status === 'defaulted').length;
 
     const avgLoanSize = loans.length > 0 
@@ -110,23 +121,17 @@ function Reports() {
       ? (totalPaid / totalPortfolio) * 100 
       : 0;
 
-    const activeBorrowers = users.length;
+    const activeBorrowers = users.filter(u => u.role === 'borrower' && u.isActive).length;
+    const totalBorrowers = users.filter(u => u.role === 'borrower').length;
+    const totalGuarantors = users.filter(u => u.role === 'guarantor').length;
 
-    // Calculate repayment time (average days to repay completed loans)
-    const completedWithRepayment = loans.filter(l => 
-      l.status === 'completed' && l.payments?.length > 0
-    );
-    
-    const avgRepaymentTime = completedWithRepayment.length > 0
-      ? completedWithRepayment.reduce((sum, l) => {
-          const firstPayment = l.payments[0]?.date;
-          if (firstPayment) {
-            const days = Math.ceil((new Date(firstPayment) - new Date(l.startDate)) / (1000 * 60 * 60 * 24));
-            return sum + days;
-          }
-          return sum;
-        }, 0) / completedWithRepayment.length
-      : 24; // Default fallback
+    // Calculate risk distribution
+    const riskDistribution = {
+      low: loans.filter(l => l.risk?.level === 'low').length,
+      medium: loans.filter(l => l.risk?.level === 'medium').length,
+      high: loans.filter(l => l.risk?.level === 'high').length,
+      critical: loans.filter(l => l.risk?.level === 'critical').length
+    };
 
     return {
       totalPortfolio,
@@ -137,9 +142,19 @@ function Reports() {
       activeLoans,
       completedLoans,
       overdueLoans,
+      pendingLoans,
+      approvedLoans,
+      rejectedLoans,
       defaultedLoans,
       activeBorrowers,
-      avgRepaymentTime: Math.round(avgRepaymentTime)
+      totalBorrowers,
+      totalGuarantors,
+      riskDistribution,
+      totalLoans: loans.length,
+      totalPayments: payments.length,
+      successfulPayments: payments.filter(p => p.status === 'success').length,
+      failedPayments: payments.filter(p => p.status === 'failed').length,
+      pendingPayments: payments.filter(p => p.status === 'pending').length
     };
   };
 
@@ -151,29 +166,38 @@ function Reports() {
 
     switch(reportType) {
       case 'performance':
-        return stats.byStatus?.map(s => ({
+        return (stats.byStatus || []).map(s => ({
           name: s._id,
-          value: s.totalAmount || 0
-        })) || [];
+          value: s.totalAmount || 0,
+          count: s.count || 0
+        }));
       
       case 'collection':
-        return stats.byStatus?.map(s => ({
+        return (stats.byStatus || []).map(s => ({
           name: s._id,
-          value: s.paidAmount || 0
-        })) || [];
+          value: s.paidAmount || 0,
+          total: s.totalAmount || 0
+        }));
       
       case 'risk':
-        return stats.byRisk?.map(r => ({
-          name: r._id,
-          value: r.count || 0,
-          avgScore: r.avgScore
-        })) || [];
+        return Object.entries(metrics?.riskDistribution || {}).map(([key, value]) => ({
+          name: key,
+          value: value,
+          percentage: loans.length > 0 ? (value / loans.length) * 100 : 0
+        }));
       
       case 'users':
         return [
-          { name: 'Borrowers', value: users.length },
-          { name: 'Guarantors', value: users.filter(u => u.role === 'guarantor').length },
-          { name: 'Active', value: users.filter(u => u.isActive).length }
+          { name: 'Borrowers', value: metrics?.totalBorrowers || 0 },
+          { name: 'Guarantors', value: metrics?.totalGuarantors || 0 },
+          { name: 'Active', value: metrics?.activeBorrowers || 0 }
+        ];
+      
+      case 'payments':
+        return [
+          { name: 'Successful', value: metrics?.successfulPayments || 0, amount: payments.filter(p => p.status === 'success').reduce((sum, p) => sum + p.amount, 0) },
+          { name: 'Pending', value: metrics?.pendingPayments || 0 },
+          { name: 'Failed', value: metrics?.failedPayments || 0 }
         ];
       
       default:
@@ -184,41 +208,88 @@ function Reports() {
   const chartData = getChartData();
 
   // Handle report export
-  const handleExportReport = async (reportTitle, reportData) => {
+  const handleExportReport = async (reportTitle, reportType, reportData) => {
     setExporting(true);
     try {
-      // Create workbook
       const wb = XLSX.utils.book_new();
-      
-      // Convert data to worksheet
       let ws;
-      if (reportType === 'performance' && stats?.byStatus) {
-        ws = XLSX.utils.json_to_sheet(stats.byStatus);
-      } else if (reportType === 'risk' && stats?.byRisk) {
-        ws = XLSX.utils.json_to_sheet(stats.byRisk);
-      } else if (loans.length) {
-        const exportLoans = loans.map(l => ({
-          'Loan ID': l.loanId,
-          'Borrower': l.borrower?.name,
-          'Amount': l.amount,
-          'Status': l.status,
-          'Paid Amount': l.paidAmount,
-          'Remaining': l.remainingAmount,
-          'Start Date': new Date(l.startDate).toLocaleDateString(),
-          'End Date': new Date(l.endDate).toLocaleDateString(),
-          'Risk Level': l.risk?.level,
-          'Created': new Date(l.createdAt).toLocaleDateString()
-        }));
-        ws = XLSX.utils.json_to_sheet(exportLoans);
+
+      switch(reportType) {
+        case 'performance':
+          ws = XLSX.utils.json_to_sheet(
+            (stats?.byStatus || []).map(s => ({
+              'Status': s._id,
+              'Number of Loans': s.count,
+              'Total Amount': s.totalAmount,
+              'Paid Amount': s.paidAmount || 0,
+              'Remaining': (s.totalAmount || 0) - (s.paidAmount || 0)
+            }))
+          );
+          break;
+
+        case 'risk':
+          ws = XLSX.utils.json_to_sheet(
+            Object.entries(metrics?.riskDistribution || {}).map(([level, count]) => ({
+              'Risk Level': level,
+              'Number of Loans': count,
+              'Percentage': `${((count / loans.length) * 100).toFixed(1)}%`
+            }))
+          );
+          break;
+
+        case 'loans':
+          ws = XLSX.utils.json_to_sheet(
+            loans.map(l => ({
+              'Loan ID': l.loanId,
+              'Borrower': l.borrower?.name,
+              'Amount': l.amount,
+              'Status': l.status,
+              'Paid Amount': l.paidAmount || 0,
+              'Remaining': (l.amount || 0) - (l.paidAmount || 0),
+              'Risk Level': l.risk?.level,
+              'Term': `${l.term} months`,
+              'Interest': `${l.interestRate}%`,
+              'Start Date': new Date(l.startDate).toLocaleDateString(),
+              'End Date': new Date(l.endDate).toLocaleDateString()
+            }))
+          );
+          break;
+
+        case 'payments':
+          ws = XLSX.utils.json_to_sheet(
+            payments.map(p => ({
+              'Date': new Date(p.createdAt).toLocaleDateString(),
+              'Borrower': p.userId?.name,
+              'Loan ID': p.loanId_display,
+              'Amount': p.amount,
+              'Method': p.paymentMethod,
+              'Phone': p.phoneNumber,
+              'Status': p.status,
+              'Transaction ID': p.transactionId
+            }))
+          );
+          break;
+
+        case 'users':
+          ws = XLSX.utils.json_to_sheet(
+            users.map(u => ({
+              'Name': u.name,
+              'Email': u.email,
+              'Phone': u.phone,
+              'Role': u.role,
+              'Status': u.isActive ? 'Active' : 'Inactive',
+              'Joined': new Date(u.createdAt).toLocaleDateString()
+            }))
+          );
+          break;
+
+        default:
+          ws = XLSX.utils.json_to_sheet(reportData || []);
       }
 
       if (ws) {
         XLSX.utils.book_append_sheet(wb, ws, "Report");
-        
-        // Generate filename
         const filename = `${reportTitle.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.xlsx`;
-        
-        // Export
         XLSX.writeFile(wb, filename);
         toast.success('Report downloaded successfully');
       }
@@ -230,13 +301,13 @@ function Reports() {
     }
   };
 
-  // Available reports list
+  // Available reports list with real data
   const availableReports = [
     {
       id: 'loan-performance',
       title: 'Monthly Loan Performance',
       date: new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-      size: '2.4 MB',
+      size: `${(loans.length * 0.5).toFixed(1)} KB`,
       icon: <BarChart3 size={20} />,
       type: 'performance',
       data: stats?.byStatus
@@ -245,18 +316,18 @@ function Reports() {
       id: 'risk-assessment',
       title: 'Risk Assessment Report',
       date: new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-      size: '1.8 MB',
+      size: '1.2 MB',
       icon: <Activity size={20} />,
       type: 'risk',
-      data: stats?.byRisk
+      data: metrics?.riskDistribution
     },
     {
       id: 'collection-efficiency',
       title: 'Collection Efficiency',
       date: new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-      size: '1.2 MB',
+      size: `${(payments.length * 0.3).toFixed(1)} KB`,
       icon: <TrendingUp size={20} />,
-      type: 'collection',
+      type: 'payments',
       data: {
         collectionRate: metrics?.collectionRate,
         totalPaid: metrics?.totalPaid,
@@ -267,39 +338,34 @@ function Reports() {
       id: 'user-acquisition',
       title: 'User Acquisition Report',
       date: new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-      size: '1.5 MB',
+      size: `${(users.length * 0.2).toFixed(1)} KB`,
       icon: <Users size={20} />,
       type: 'users',
       data: {
         total: users.length,
         active: users.filter(u => u.isActive).length,
         borrowers: users.filter(u => u.role === 'borrower').length,
-        guarantors: users.filter(u => u.role === 'guarantor').length
+        guarantors: users.filter(u => u.role === 'guarantor').length,
+        admins: users.filter(u => ['admin', 'super_admin'].includes(u.role)).length
       }
     },
     {
       id: 'financial-summary',
       title: 'Financial Summary',
       date: new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-      size: '2.1 MB',
+      size: `${(loans.length * 0.4).toFixed(1)} KB`,
       icon: <DollarSign size={20} />,
       type: 'financial',
       data: metrics
     },
     {
-      id: 'compliance-report',
-      title: 'Compliance Report',
+      id: 'complete-loan-list',
+      title: 'Complete Loan List',
       date: new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-      size: '1.3 MB',
+      size: `${(loans.length * 0.8).toFixed(1)} KB`,
       icon: <FileText size={20} />,
-      type: 'compliance',
-      data: {
-        totalLoans: loans.length,
-        activeLoans: metrics?.activeLoans,
-        completedLoans: metrics?.completedLoans,
-        overdueLoans: metrics?.overdueLoans,
-        defaultedLoans: metrics?.defaultedLoans
-      }
+      type: 'loans',
+      data: loans
     }
   ];
 
@@ -324,7 +390,7 @@ function Reports() {
             Reports & Analytics
           </h1>
           <p className="text-gray-600 mt-1.5 flex items-center gap-2">
-            <span className="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+            <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
             Comprehensive insights into loan performance and system metrics
           </p>
         </div>
@@ -347,7 +413,7 @@ function Reports() {
           </div>
           
           <button 
-            onClick={() => handleExportReport('Complete_Report', { stats, loans, users })}
+            onClick={() => handleExportReport('Complete_Report', 'complete', { loans, users, payments, stats })}
             disabled={exporting}
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-lg shadow-lg shadow-green-600/30 hover:from-green-700 hover:to-green-800 transition-all disabled:opacity-50"
           >
@@ -358,42 +424,55 @@ function Reports() {
       </div>
 
       {/* Report Type Selection */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <ReportTypeCard
           title="Loan Performance"
-          value={`$${metrics?.totalPortfolio?.toLocaleString() || '0'}`}
-          change={`+${((metrics?.collectionRate || 0) - 80).toFixed(1)}%`}
-          trendUp={metrics?.collectionRate > 80}
+          value={`$${(metrics?.totalPortfolio || 0).toLocaleString()}`}
+          change={`${((metrics?.collectionRate || 0) - 75).toFixed(1)}%`}
+          trendUp={(metrics?.collectionRate || 0) > 75}
           icon={<BarChart3 size={24} />}
           active={reportType === "performance"}
           onClick={() => setReportType("performance")}
         />
         <ReportTypeCard
           title="Collection Rate"
-          value={`${metrics?.collectionRate?.toFixed(1) || '0'}%`}
-          change={`${metrics?.collectionRate > 90 ? '+' : '-'}${Math.abs((metrics?.collectionRate || 0) - 90).toFixed(1)}%`}
-          trendUp={metrics?.collectionRate > 90}
+          value={`${(metrics?.collectionRate || 0).toFixed(1)}%`}
+          change={`${((metrics?.collectionRate || 0) - 85).toFixed(1)}%`}
+          trendUp={(metrics?.collectionRate || 0) > 85}
           icon={<TrendingUp size={24} />}
           active={reportType === "collection"}
           onClick={() => setReportType("collection")}
         />
         <ReportTypeCard
           title="Risk Analysis"
-          value={`${metrics?.defaultRate?.toFixed(1) || '0'}%`}
-          change={`${metrics?.defaultRate > 5 ? '+' : '-'}${Math.abs((metrics?.defaultRate || 0) - 5).toFixed(1)}%`}
-          trendUp={metrics?.defaultRate < 5}
+          value={`${(metrics?.riskDistribution?.high || 0) + (metrics?.riskDistribution?.critical || 0)} loans`}
+          change={`${((metrics?.riskDistribution?.critical || 0) / (loans.length || 1) * 100).toFixed(1)}% critical`}
+          trendUp={(metrics?.riskDistribution?.critical || 0) < 5}
           icon={<Activity size={24} />}
           active={reportType === "risk"}
           onClick={() => setReportType("risk")}
         />
         <ReportTypeCard
           title="User Growth"
-          value={`+${metrics?.activeBorrowers || 0}`}
-          change={`+${((metrics?.activeBorrowers || 0) / 10).toFixed(1)}%`}
+          value={`${metrics?.totalBorrowers || 0}`}
+          change={`+${users.filter(u => {
+            const created = new Date(u.createdAt);
+            const range = getDateRange();
+            return created >= range;
+          }).length} new`}
           trendUp={true}
           icon={<Users size={24} />}
           active={reportType === "users"}
           onClick={() => setReportType("users")}
+        />
+        <ReportTypeCard
+          title="Payments"
+          value={metrics?.totalPayments || 0}
+          change={`$${(metrics?.totalPaid || 0).toLocaleString()}`}
+          trendUp={true}
+          icon={<CreditCard size={24} />}
+          active={reportType === "payments"}
+          onClick={() => setReportType("payments")}
         />
       </div>
 
@@ -407,6 +486,7 @@ function Reports() {
               {reportType === "collection" && "Collection Rate Summary"}
               {reportType === "risk" && "Risk Distribution Analysis"}
               {reportType === "users" && "User Growth Metrics"}
+              {reportType === "payments" && "Payment Statistics"}
             </h2>
             <p className="text-sm text-gray-500 mt-0.5">
               {dateRange === "week" && "Last 7 days"}
@@ -415,6 +495,14 @@ function Reports() {
               {dateRange === "year" && "Last 12 months"}
             </p>
           </div>
+          <button
+            onClick={() => handleExportReport(reportType, reportType, chartData)}
+            disabled={exporting}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 hover:text-green-600 hover:bg-green-50 rounded-lg transition"
+          >
+            <Download size={16} />
+            Export
+          </button>
         </div>
 
         {/* Data Table */}
@@ -423,6 +511,7 @@ function Reports() {
             <thead>
               <tr className="border-b border-gray-200">
                 <th className="text-left py-3 px-4 text-sm font-medium text-gray-600">Category</th>
+                <th className="text-right py-3 px-4 text-sm font-medium text-gray-600">Count</th>
                 <th className="text-right py-3 px-4 text-sm font-medium text-gray-600">Value</th>
                 <th className="text-right py-3 px-4 text-sm font-medium text-gray-600">Percentage</th>
               </tr>
@@ -432,26 +521,45 @@ function Reports() {
                 <tr key={index} className="border-b border-gray-100 hover:bg-gray-50">
                   <td className="py-3 px-4 text-sm text-gray-800 capitalize">{item.name}</td>
                   <td className="py-3 px-4 text-sm text-gray-800 text-right">
-                    {item.name.includes('Risk') ? item.value : `$${item.value?.toLocaleString() || 0}`}
+                    {item.count || item.value || 0}
+                  </td>
+                  <td className="py-3 px-4 text-sm text-gray-800 text-right">
+                    {item.amount ? `$${item.amount.toLocaleString()}` : 
+                     item.total ? `$${item.total.toLocaleString()}` : 
+                     item.name.includes('Risk') ? '-' : 
+                     `$${item.value?.toLocaleString() || 0}`}
                   </td>
                   <td className="py-3 px-4 text-sm text-right">
                     <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs ${
-                      item.name === 'low' || item.name === 'completed' 
+                      item.name === 'low' || item.name === 'completed' || item.name === 'successful'
                         ? 'bg-green-100 text-green-700'
-                        : item.name === 'medium' || item.name === 'active'
+                        : item.name === 'medium' || item.name === 'active' || item.name === 'pending'
                         ? 'bg-yellow-100 text-yellow-700'
-                        : item.name === 'high' || item.name === 'overdue'
+                        : item.name === 'high' || item.name === 'overdue' || item.name === 'failed'
                         ? 'bg-orange-100 text-orange-700'
+                        : item.name === 'critical' || item.name === 'rejected'
+                        ? 'bg-red-100 text-red-700'
                         : 'bg-gray-100 text-gray-700'
                     }`}>
-                      {item.avgScore 
-                        ? `${((item.value / loans.length) * 100).toFixed(1)}% (Score: ${item.avgScore.toFixed(0)})`
-                        : `${((item.value / (reportType === 'users' ? users.length : loans.length)) * 100).toFixed(1)}%`
+                      {item.percentage 
+                        ? `${item.percentage.toFixed(1)}%`
+                        : item.name.includes('Risk') 
+                        ? `${((item.value / loans.length) * 100).toFixed(1)}%`
+                        : reportType === 'users'
+                        ? `${((item.value / (metrics?.totalBorrowers || 1)) * 100).toFixed(1)}%`
+                        : `${((item.value / (reportType === 'payments' ? metrics?.totalPayments || 1 : (stats?.byStatus?.reduce((sum, s) => sum + s.totalAmount, 0) || 1))) * 100).toFixed(1)}%`
                       }
                     </span>
                   </td>
                 </tr>
               ))}
+              {chartData.length === 0 && (
+                <tr>
+                  <td colSpan="4" className="py-8 text-center text-gray-500">
+                    No data available for this report type
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -480,7 +588,7 @@ function Reports() {
                 setSelectedReport(report);
                 setShowReportModal(true);
               }}
-              onDownload={() => handleExportReport(report.title, report.data)}
+              onDownload={() => handleExportReport(report.title, report.type, report.data)}
               exporting={exporting}
             />
           ))}
@@ -491,11 +599,16 @@ function Reports() {
       {showReportModal && selectedReport && (
         <ReportPreviewModal
           report={selectedReport}
+          metrics={metrics}
+          users={users}
+          loans={loans}
+          payments={payments}
+          stats={stats}
           onClose={() => {
             setShowReportModal(false);
             setSelectedReport(null);
           }}
-          onDownload={() => handleExportReport(selectedReport.title, selectedReport.data)}
+          onDownload={() => handleExportReport(selectedReport.title, selectedReport.type, selectedReport.data)}
           exporting={exporting}
         />
       )}
@@ -508,14 +621,14 @@ function ReportTypeCard({ title, value, change, trendUp, icon, active, onClick }
     <button
       onClick={onClick}
       className={`
-        p-6 rounded-xl border transition-all text-left
+        p-4 rounded-xl border transition-all text-left
         ${active 
           ? "bg-gradient-to-br from-green-600 to-emerald-600 border-green-700 shadow-lg shadow-green-600/30" 
           : "bg-white border-gray-100 hover:border-green-300 hover:shadow-md"
         }
       `}
     >
-      <div className={`p-3 rounded-xl w-fit mb-4 ${
+      <div className={`p-2 rounded-xl w-fit mb-3 ${
         active ? "bg-white/20" : "bg-green-50"
       }`}>
         <div className={active ? "text-white" : "text-green-600"}>
@@ -523,23 +636,23 @@ function ReportTypeCard({ title, value, change, trendUp, icon, active, onClick }
         </div>
       </div>
       <div>
-        <p className={`text-sm mb-1 ${active ? "text-green-100" : "text-gray-600"}`}>
+        <p className={`text-xs mb-1 ${active ? "text-green-100" : "text-gray-600"}`}>
           {title}
         </p>
         <div className="flex items-center gap-2">
-          <span className={`text-2xl font-bold ${
+          <span className={`text-lg font-bold ${
             active ? "text-white" : "text-gray-800"
           }`}>
             {value}
           </span>
-          <span className={`flex items-center gap-0.5 text-xs font-medium px-2 py-1 rounded-full ${
+          <span className={`flex items-center gap-0.5 text-xs font-medium px-1.5 py-0.5 rounded-full ${
             active 
               ? "bg-white/20 text-white" 
               : trendUp 
                 ? "bg-green-100 text-green-700" 
                 : "bg-orange-100 text-orange-700"
           }`}>
-            {trendUp ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
+            {trendUp ? <ArrowUpRight size={10} /> : <ArrowDownRight size={10} />}
             {change}
           </span>
         </div>
@@ -583,7 +696,7 @@ function ReportDownloadCard({ report, onView, onDownload, exporting }) {
   );
 }
 
-function ReportPreviewModal({ report, onClose, onDownload, exporting }) {
+function ReportPreviewModal({ report, metrics, users, loans, payments, stats, onClose, onDownload, exporting }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] overflow-hidden shadow-xl">
@@ -611,100 +724,141 @@ function ReportPreviewModal({ report, onClose, onDownload, exporting }) {
           <div className="space-y-4">
             <h3 className="font-medium text-gray-800">Report Preview</h3>
             
-            {report.type === 'performance' && report.data && (
+            {report.type === 'performance' && stats?.byStatus && (
               <div className="bg-gray-50 rounded-lg p-4">
-                {report.data.map((item, idx) => (
+                {stats.byStatus.map((item, idx) => (
                   <div key={idx} className="flex justify-between items-center py-2 border-b border-gray-200 last:border-0">
                     <span className="text-sm text-gray-600 capitalize">{item._id}</span>
-                    <span className="text-sm font-medium text-gray-800">${item.totalAmount?.toLocaleString() || 0}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {report.type === 'risk' && report.data && (
-              <div className="bg-gray-50 rounded-lg p-4">
-                {report.data.map((item, idx) => (
-                  <div key={idx} className="flex justify-between items-center py-2 border-b border-gray-200 last:border-0">
-                    <span className="text-sm text-gray-600 capitalize">{item._id} Risk</span>
                     <div className="text-right">
-                      <span className="text-sm font-medium text-gray-800 block">{item.count} loans</span>
-                      <span className="text-xs text-gray-500">Avg Score: {item.avgScore?.toFixed(0)}</span>
+                      <span className="text-sm font-medium text-gray-800 block">${item.totalAmount?.toLocaleString() || 0}</span>
+                      <span className="text-xs text-gray-500">{item.count || 0} loans</span>
                     </div>
                   </div>
                 ))}
               </div>
             )}
 
-            {report.type === 'users' && report.data && (
+            {report.type === 'risk' && metrics?.riskDistribution && (
+              <div className="bg-gray-50 rounded-lg p-4">
+                {Object.entries(metrics.riskDistribution).map(([level, count], idx) => (
+                  <div key={idx} className="flex justify-between items-center py-2 border-b border-gray-200 last:border-0">
+                    <span className="text-sm text-gray-600 capitalize">{level} Risk</span>
+                    <div className="text-right">
+                      <span className="text-sm font-medium text-gray-800 block">{count} loans</span>
+                      <span className="text-xs text-gray-500">{((count / loans.length) * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {report.type === 'users' && (
               <div className="bg-gray-50 rounded-lg p-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="text-center p-3 bg-white rounded-lg">
                     <p className="text-xs text-gray-500">Total Users</p>
-                    <p className="text-2xl font-bold text-gray-800">{report.data.total}</p>
+                    <p className="text-2xl font-bold text-gray-800">{users.length}</p>
                   </div>
                   <div className="text-center p-3 bg-white rounded-lg">
                     <p className="text-xs text-gray-500">Active Users</p>
-                    <p className="text-2xl font-bold text-green-600">{report.data.active}</p>
+                    <p className="text-2xl font-bold text-green-600">{users.filter(u => u.isActive).length}</p>
                   </div>
                   <div className="text-center p-3 bg-white rounded-lg">
                     <p className="text-xs text-gray-500">Borrowers</p>
-                    <p className="text-lg font-semibold text-gray-800">{report.data.borrowers}</p>
+                    <p className="text-lg font-semibold text-gray-800">{users.filter(u => u.role === 'borrower').length}</p>
                   </div>
                   <div className="text-center p-3 bg-white rounded-lg">
                     <p className="text-xs text-gray-500">Guarantors</p>
-                    <p className="text-lg font-semibold text-gray-800">{report.data.guarantors}</p>
+                    <p className="text-lg font-semibold text-gray-800">{users.filter(u => u.role === 'guarantor').length}</p>
                   </div>
                 </div>
               </div>
             )}
 
-            {report.type === 'financial' && report.data && (
+            {report.type === 'payments' && (
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div className="text-center p-3 bg-white rounded-lg">
+                    <p className="text-xs text-gray-500">Total Payments</p>
+                    <p className="text-2xl font-bold text-gray-800">{payments.length}</p>
+                  </div>
+                  <div className="text-center p-3 bg-white rounded-lg">
+                    <p className="text-xs text-gray-500">Total Collected</p>
+                    <p className="text-2xl font-bold text-green-600">
+                      ${payments.filter(p => p.status === 'success').reduce((sum, p) => sum + p.amount, 0).toLocaleString()}
+                    </p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Successful</span>
+                    <span className="text-sm font-medium text-green-600">
+                      {payments.filter(p => p.status === 'success').length} (${payments.filter(p => p.status === 'success').reduce((sum, p) => sum + p.amount, 0).toLocaleString()})
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Pending</span>
+                    <span className="text-sm font-medium text-yellow-600">
+                      {payments.filter(p => p.status === 'pending').length}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Failed</span>
+                    <span className="text-sm font-medium text-red-600">
+                      {payments.filter(p => p.status === 'failed').length}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {report.type === 'financial' && metrics && (
               <div className="bg-gray-50 rounded-lg p-4">
                 <div className="space-y-3">
                   <div className="flex justify-between">
                     <span className="text-sm text-gray-600">Total Portfolio</span>
-                    <span className="text-sm font-medium text-gray-800">${report.data.totalPortfolio?.toLocaleString()}</span>
+                    <span className="text-sm font-medium text-gray-800">${metrics.totalPortfolio?.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Total Paid</span>
+                    <span className="text-sm font-medium text-green-600">${metrics.totalPaid?.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-sm text-gray-600">Collection Rate</span>
-                    <span className="text-sm font-medium text-green-600">{report.data.collectionRate?.toFixed(1)}%</span>
+                    <span className="text-sm font-medium text-green-600">{metrics.collectionRate?.toFixed(1)}%</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-sm text-gray-600">Avg Loan Size</span>
-                    <span className="text-sm font-medium text-gray-800">${report.data.avgLoanSize?.toFixed(0)}</span>
+                    <span className="text-sm font-medium text-gray-800">${metrics.avgLoanSize?.toFixed(0)}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-sm text-gray-600">Default Rate</span>
-                    <span className="text-sm font-medium text-orange-600">{report.data.defaultRate?.toFixed(1)}%</span>
+                    <span className="text-sm font-medium text-orange-600">{metrics.defaultRate?.toFixed(1)}%</span>
                   </div>
                 </div>
               </div>
             )}
 
-            {report.type === 'compliance' && report.data && (
-              <div className="bg-gray-50 rounded-lg p-4">
-                <div className="space-y-3">
-                  <div className="flex justify-between">
-                    <span className="text-sm text-gray-600">Total Loans</span>
-                    <span className="text-sm font-medium text-gray-800">{report.data.totalLoans}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-sm text-gray-600">Active Loans</span>
-                    <span className="text-sm font-medium text-green-600">{report.data.activeLoans}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-sm text-gray-600">Completed</span>
-                    <span className="text-sm font-medium text-blue-600">{report.data.completedLoans}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-sm text-gray-600">Overdue</span>
-                    <span className="text-sm font-medium text-orange-600">{report.data.overdueLoans}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-sm text-gray-600">Defaulted</span>
-                    <span className="text-sm font-medium text-red-600">{report.data.defaultedLoans}</span>
-                  </div>
+            {report.type === 'loans' && (
+              <div className="bg-gray-50 rounded-lg p-4 max-h-60 overflow-y-auto">
+                <div className="space-y-2">
+                  {loans.slice(0, 5).map((loan, idx) => (
+                    <div key={idx} className="flex justify-between items-center p-2 bg-white rounded border border-gray-100">
+                      <div>
+                        <p className="text-xs font-medium text-gray-800">{loan.loanId}</p>
+                        <p className="text-xs text-gray-500">{loan.borrower?.name}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs font-semibold text-gray-800">${loan.amount?.toLocaleString()}</p>
+                        <p className="text-xs text-gray-500">{loan.status}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {loans.length > 5 && (
+                    <p className="text-xs text-center text-gray-500 mt-2">
+                      ... and {loans.length - 5} more loans
+                    </p>
+                  )}
                 </div>
               </div>
             )}

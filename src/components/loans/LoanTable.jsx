@@ -123,15 +123,20 @@ export function LoanTable({
                     <div className="flex justify-between text-xs mb-1">
                       <span className="text-gray-600">Progress</span>
                       <span className="font-medium text-gray-900">
-                        {loan.amount > 0 ? Math.round((loan.paidAmount / loan.amount) * 100) : 0}%
+                        {Math.round(loan.progress || 0)}%
                       </span>
                     </div>
                     <div className="w-full bg-gray-200 rounded-full h-1.5">
                       <div 
                         className="bg-emerald-600 h-1.5 rounded-full transition-all duration-300"
-                        style={{ width: `${loan.amount > 0 ? (loan.paidAmount / loan.amount) * 100 : 0}%` }}
+                        style={{ width: `${loan.progress || 0}%` }}
                       />
                     </div>
+                    {loan.paidInstallments !== undefined && loan.totalInstallments !== undefined && (
+                      <div className="text-xs text-gray-500 mt-1 text-center">
+                        {loan.paidInstallments}/{loan.totalInstallments} installments
+                      </div>
+                    )}
                   </div>
                 </td>
                 <td className="px-6 py-4">

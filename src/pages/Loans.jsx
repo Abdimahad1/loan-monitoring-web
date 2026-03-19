@@ -46,34 +46,35 @@ function Loans() {
     fetchUsers();
   }, [statusFilter, riskFilter, pagination.page, searchTerm]);
 
-  const fetchLoans = async () => {
-    setLoading(true);
-    try {
-      const token = localStorage.getItem('token');
-      const params = new URLSearchParams({
-        page: pagination.page,
-        limit: pagination.limit,
-        ...(statusFilter !== 'all' && { status: statusFilter }),
-        ...(riskFilter !== 'all' && { risk: riskFilter }),
-        ...(searchTerm && { search: searchTerm })
-      });
+const fetchLoans = async () => {
+  setLoading(true);
+  try {
+    const token = localStorage.getItem('token');
+    const params = new URLSearchParams({
+      page: pagination.page,
+      limit: pagination.limit,
+      ...(statusFilter !== 'all' && { status: statusFilter }),
+      ...(riskFilter !== 'all' && { risk: riskFilter }),
+      ...(searchTerm && { search: searchTerm })
+    });
 
-      const response = await axios.get(`${API_URL}/loans?${params}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+    // CHANGE THIS LINE - use the new endpoint
+    const response = await axios.get(`${API_URL}/loans/with-progress?${params}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
 
-      if (response.data.success) {
-        setLoans(response.data.data);
-        setStats(response.data.summary);
-        setPagination(response.data.pagination);
-      }
-    } catch (error) {
-      toast.error('Failed to load loans');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+    if (response.data.success) {
+      setLoans(response.data.data);
+      setStats(response.data.summary);
+      setPagination(response.data.pagination);
     }
-  };
+  } catch (error) {
+    toast.error('Failed to load loans');
+  } finally {
+    setLoading(false);
+    setRefreshing(false);
+  }
+};
 
   const fetchUsers = async () => {
     try {
